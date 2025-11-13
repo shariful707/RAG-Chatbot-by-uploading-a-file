@@ -10,7 +10,7 @@ from io import BytesIO
 
 # --- Configuration ---
 OLLAMA_CHAT_ENDPOINT = "http://localhost:11434/api/chat"
-OLLAMA_MODEL = "llama3.1"
+OLLAMA_MODEL = "llama3.1:latest"
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 PERSIST_DIR = "faiss_data" 
 INDEX_FILE = os.path.join(PERSIST_DIR, "faiss_index.bin")
