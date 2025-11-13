@@ -7,6 +7,7 @@ import os
 from sentence_transformers import SentenceTransformer
 from pypdf import PdfReader
 from io import BytesIO
+import mimetypes # Import for file type checking
 
 # --- Configuration ---
 OLLAMA_CHAT_ENDPOINT = "http://localhost:11434/api/chat"
@@ -15,7 +16,7 @@ EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 PERSIST_DIR = "faiss_data" 
 INDEX_FILE = os.path.join(PERSIST_DIR, "faiss_index.bin")
 METADATA_FILE = os.path.join(PERSIST_DIR, "rag_chunks.json")
-HISTORY_FILE = os.path.join(PERSIST_DIR, "chat_history.json") # NEW: File for conversation history
+HISTORY_FILE = os.path.join(PERSIST_DIR, "chat_history.json") 
 
 # --- Initial Setup ---
 @st.cache_resource
@@ -38,7 +39,7 @@ def save_persistence_data():
     index = st.session_state.knowledge_base["index"]
     chunks = st.session_state.knowledge_base["chunks"]
     filenames = st.session_state.knowledge_base["filenames"]
-    messages = st.session_state.messages # Get history
+    messages = st.session_state.messages 
 
     # 1. Create directory if it doesn't exist
     os.makedirs(PERSIST_DIR, exist_ok=True)
@@ -60,6 +61,7 @@ def save_persistence_data():
 def load_persistence_data():
     """Loads the FAISS index, chunk metadata, and conversation history from disk."""
     rag_loaded = False
+    history_loaded = False
     
     # 1. Load FAISS Index and RAG Metadata
     if os.path.exists(INDEX_FILE) and os.path.exists(METADATA_FILE):
@@ -84,28 +86,48 @@ def load_persistence_data():
         except Exception as e:
             st.sidebar.warning(f"Error loading chat history: {e}. Starting fresh chat.")
 
-    if rag_loaded:
-        st.sidebar.success(f"💾 RAG index and history loaded from '{PERSIST_DIR}'.")
-    elif history_loaded:
-        st.sidebar.success(f"💾 Chat history loaded from '{PERSIST_DIR}'.")
+    if rag_loaded or history_loaded:
+        st.sidebar.success(f"💾 State loaded from '{PERSIST_DIR}'.")
     return rag_loaded or history_loaded
 
-# NEW: Attempt to load the index and history automatically on first run
+# Attempt to load the index and history automatically on first run
 if st.session_state.knowledge_base["index"] is None or not st.session_state.messages:
     load_persistence_data()
 
-# --- Core RAG Functions ---
+# --- Core RAG Functions (Multifile Support Added) ---
 
 def get_document_text(file):
-    """Extract text from a PDF file."""
-    pdf_reader = PdfReader(BytesIO(file.read()))
-    text = ""
-    for page in pdf_reader.pages:
-        text += page.extract_text()
-    return text
+    """
+    Extract text from uploaded file, supporting multiple types (PDF, TXT, MD, etc.).
+    """
+    file_type = file.type
+    
+    if 'pdf' in file_type:
+        st.info("Reading PDF document...")
+        pdf_reader = PdfReader(BytesIO(file.read()))
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() or "" # Use "" if extract_text returns None
+        return text
+        
+    elif 'text' in file_type or file.name.endswith(('.txt', '.md', '.json', '.html')):
+        st.info(f"Reading text file ({file.name})...")
+        # For text-like files, read the content directly as a string
+        try:
+            string_data = file.read().decode("utf-8")
+            return string_data
+        except UnicodeDecodeError:
+            st.error("Could not decode file as UTF-8. Please ensure it is plain text.")
+            return ""
+    else:
+        st.error(f"Unsupported file type: {file_type}. Only PDF and common text files are supported.")
+        return ""
 
 def chunk_text(text, chunk_size=512, chunk_overlap=50):
     """Simple text chunking logic."""
+    if not text:
+        return []
+        
     chunks = []
     current_start = 0
     while current_start < len(text):
@@ -116,6 +138,10 @@ def chunk_text(text, chunk_size=512, chunk_overlap=50):
 
 def build_vector_store(text_chunks, filename):
     """Generate embeddings, build FAISS index, and save to disk."""
+    if not text_chunks:
+        st.error("No text chunks were generated. Vector store build cancelled.")
+        return
+        
     # 1. Embed chunks
     embeddings = embedding_model.encode(text_chunks, convert_to_tensor=False)
     embeddings = np.array(embeddings).astype('float32')
@@ -237,7 +263,7 @@ def handle_user_input(user_query):
     # 2. Add final LLM response to conversation memory
     st.session_state.messages.append({"role": "assistant", "content": full_llm_response})
     
-    # 3. NEW: Save the updated conversation history
+    # 3. Save the updated conversation history
     save_persistence_data()
     
     # 4. Display sources/citations dynamically
@@ -254,14 +280,18 @@ st.caption(f"LLM: {OLLAMA_MODEL} via Ollama | Embeddings: {EMBEDDING_MODEL_NAME}
 # Sidebar for file upload
 with st.sidebar:
     st.header("Upload Document (RAG)")
-    uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
+    st.markdown("Supports **PDF**, **TXT**, **MD**, and other common text files.")
+    
+    # Updated file_uploader to allow a broader range of files
+    uploaded_file = st.file_uploader("Upload document", type=["pdf", "txt", "md", "json", "html"])
     
     if st.button("Process Document") and uploaded_file is not None:
         with st.spinner(f"Processing and embedding {uploaded_file.name}..."):
             try:
                 raw_text = get_document_text(uploaded_file)
-                chunks = chunk_text(raw_text)
-                build_vector_store(chunks, uploaded_file.name)
+                if raw_text:
+                    chunks = chunk_text(raw_text)
+                    build_vector_store(chunks, uploaded_file.name)
             except Exception as e:
                 st.error(f"Error during document processing: {e}")
                 
@@ -274,14 +304,14 @@ with st.sidebar:
         st.warning("⚠️ No document loaded. Chat will be general conversation.")
         
     if st.button("Clear History & Documents"):
-        # NEW: Added removal of the persistent history file
+        # Added removal of the persistent history file
         for file_path in [INDEX_FILE, METADATA_FILE, HISTORY_FILE]:
             if os.path.exists(file_path):
                  os.remove(file_path)
              
         st.session_state.messages = []
         st.session_state.knowledge_base = {"index": None, "chunks": [], "filenames": []}
-        st.experimental_rerun()
+        st.rerun()
 
 
 # Display chat history
